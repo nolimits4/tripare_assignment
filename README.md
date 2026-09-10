@@ -81,7 +81,8 @@ at the Fargate task security group.
 │   ├── modules/
 │   │   ├── network/                VPC, public/private subnets, IGW, NAT, routes
 │   │   ├── ecs/                    ALB, ALB SG, tasks SG, cluster, task def, service, IAM
-│   │   └── rds/                    RDS SG, subnet group, parameter group, instance, secret
+│   │   ├── rds/                    RDS SG, subnet group, parameter group, instance, secret
+│   │   └── backup/                 S3 bucket, scheduled pg_dump task, lifecycle, alarm
 │   └── envs/
 │       ├── dev/                    small, single NAT, retention 1d,  protection off
 │       └── prod/                   large, NAT per AZ, retention 30d, protection on
@@ -106,7 +107,8 @@ at the Fargate task security group.
 │
 └── .github/workflows/
     ├── terraform.yml               fmt, init, validate, plan → PR comment + artifact
-    └── database.yml                shellcheck, compose up, backup, restore
+    ├── db-tests.yml                PR only: proves the scripts work
+    └── db-restore-drill.yml        manual only: on-demand recovery rehearsal
 ```
 
 ---
@@ -238,7 +240,36 @@ The plan is surfaced **three** ways:
   containing the full text plan and the binary plan file, kept 14 days.
 - **Job summary** — the same table and plan rendered on the run's summary page.
 
-`.github/workflows/database.yml` covers the database half: shellcheck over
+### Why there is no scheduled backup workflow
+
+The three workflows are split by *who triggers them and why*:
+
+| Workflow | Trigger | Purpose |
+| --- | --- | --- |
+| `terraform.yml` | PR touching `infra/` | fmt, validate, plan |
+| `db-tests.yml` | PR touching `db/`, `scripts/`, compose | Proves the scripts work on a clean checkout |
+| `db-restore-drill.yml` | Manual only | On-demand recovery rehearsal |
+
+Deliberately absent: a cron workflow that runs `backup.sh` every few hours.
+GitHub Actions runners are ephemeral, so such a job would create a fresh
+container, seed it, dump the data it had just generated, and then destroy
+everything. It would back up nothing that existed before the run and leave
+nothing behind after it — a green checkmark every four hours providing zero
+recovery capability, which is worse than no job at all because it *looks* like
+backup coverage.
+
+Scheduled backups belong in the infrastructure, and live in two places here:
+
+1. **RDS automated backups** — configured in the `rds` module, 1 day in dev and
+   30 days in prod, giving point-in-time recovery.
+2. **`infra/modules/backup/`** — an EventBridge schedule firing a Fargate task
+   every four hours that runs `pg_dump` and streams the result to S3. See
+   [Scheduled backups](#scheduled-backups-in-aws).
+
+Restore is manual by design. It is destructive, and a human has to decide which
+dump to trust; automating it on a timer would be actively dangerous.
+
+`.github/workflows/db-tests.yml` covers the database half: shellcheck over
 every script, `docker compose up --wait`, the EXPLAIN benchmark, then
 `backup.sh` followed by `restore.sh`. It is the same sequence run by hand, so a green run means the checked-out repo genuinely works.
 
@@ -454,6 +485,51 @@ docker compose exec postgres psql -U hotelapp -d hotelapp_restored -f /sql/queri
 docker compose exec postgres psql -U hotelapp -d hotelapp_restored -f /sql/queries/report_query.sql
 ```
 
+### Scheduled backups in AWS
+
+`infra/modules/backup/` provisions the production side of the same idea:
+
+| Piece | What it does |
+| --- | --- |
+| EventBridge Scheduler | Fires every 4 hours (`rate(4 hours)`), 15-minute flexible window, 2 retries |
+| Fargate task | Runs `pg_dump --format=custom` and streams it straight to S3 — no local disk staging |
+| S3 bucket | Versioned, encrypted, all public access blocked |
+| Lifecycle | prod: Standard-IA at 30 days → Glacier IR at 90 → expire at 365. dev: expire at 7 |
+| Task IAM role | `s3:PutObject` on `dumps/*` only — it cannot read or delete existing backups |
+| CloudWatch alarm | Fires when no successful dump is logged within two scheduled windows |
+
+Two details worth calling out:
+
+- **The task role is write-only.** It can create backups but cannot list, read
+  or delete them. A compromised application task therefore cannot exfiltrate
+  the backup history or wipe it — which is exactly what ransomware attempts
+  first.
+- **The alarm watches for *absence*.** A backup job that quietly stops running
+  looks identical to one that is working, right up until the day you need it.
+  The metric filter counts successful dumps and the alarm treats missing data
+  as breaching.
+
+Environment differences:
+
+| | dev | prod |
+| --- | --- | --- |
+| Schedule enabled | `false` | `true` |
+| Retention | 7 days | 365 days |
+| Storage tiering | none | IA → Glacier IR |
+| Failure alarm | off | on |
+| Bucket force-destroy | allowed | blocked |
+
+Dev has the schedule defined but disabled: RDS automated backups already cover
+that environment, and a Fargate task every four hours is pure cost for a
+database nobody would ever restore from.
+
+The backup task gets its own security group, created in the environment root
+(`backup.tf`) rather than inside the module. RDS must allow that group, and the
+module needs the RDS secret ARN — defining it inside the module would create a
+cycle between the two.
+
+### Verifying a dump — locally
+
 A genuinely end-to-end check — destroy everything and rebuild from the dump
 alone:
 
@@ -526,6 +602,16 @@ cost saving available in this design.
 crashes on boot would otherwise leave the service cycling indefinitely. With
 the circuit breaker enabled, ECS detects the failed deployment and rolls back
 to the last healthy revision on its own.
+
+**Why dumps are copied rather than bind-mounted.** The obvious design is to
+mount `./backups` into the container and let `pg_dump --file` write straight to
+it. That breaks on Linux and on CI: `pg_dump` runs as the postgres user
+(uid 999) while the host directory belongs to whoever cloned the repository, so
+the directory is not writable and the dump fails. Docker Desktop hides the
+mismatch on macOS and Windows, which makes it a bug that only ever appears in
+CI. Writing to a container-local path and copying the result out with
+`docker cp` avoids uid mapping altogether and behaves the same everywhere.
+`restore.sh` copies in the same direction for the same reason.
 
 **Why the dump is `--format=custom`.** It is compressed, it can be restored
 selectively, and `pg_restore --list` gives a cheap integrity check that plain
