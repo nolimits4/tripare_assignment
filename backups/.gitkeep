@@ -1,0 +1,2 @@
+# Dumps written by scripts/backup.sh land here. The directory is tracked so
+# the scripts have somewhere to write on a fresh clone; its contents are not.

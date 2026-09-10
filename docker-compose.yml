@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hotelapp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hotelapp}
+      POSTGRES_USER: ${POSTGRES_USER:-hotelapp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hotelapp_local_pw}
+      # Deterministic collation keeps EXPLAIN output comparable across machines.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Files in this directory run once, in filename order, on first start.
+      # The bootstrap script applies migrations then seed data from /sql.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./db/migrations:/sql/migrations:ro
+      - ./db/seed:/sql/seed:ro
+      - ./db/queries:/sql/queries:ro
+      # Backups land on the host so restore.sh can read them back.
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hotelapp} -d ${POSTGRES_DB:-hotelapp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
+    name: hotelapp-pgdata

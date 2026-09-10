@@ -1,0 +1,212 @@
+name: Terraform
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.9.8"
+  # Keeps plan output readable in the workflow log.
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check -recursive
+        run: terraform fmt -check -recursive -diff infra/
+
+  validate-and-plan:
+    name: Validate and plan (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    needs: fmt
+
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+
+    defaults:
+      run:
+        working-directory: infra/envs/${{ matrix.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # No AWS credentials are configured, so state stays local to the runner
+      # and the plan runs in the speculative mode described in the README.
+      - name: terraform init
+        id: init
+        run: terraform init -backend=false -no-color
+
+      - name: terraform validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: terraform plan
+        id: plan
+        # A plan needs to reach AWS to read data sources, so without
+        # credentials this step reports the error instead of failing the run.
+        # With credentials present it produces a real plan.
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          terraform plan \
+            -no-color \
+            -refresh=false \
+            -input=false \
+            -lock=false \
+            -var-file="${{ matrix.environment }}.tfvars" \
+            -out="${{ matrix.environment }}.tfplan" 2>&1 | tee plan.txt
+
+      - name: Render plan to text
+        if: always()
+        run: |
+          if [ -f "${{ matrix.environment }}.tfplan" ]; then
+            terraform show -no-color "${{ matrix.environment }}.tfplan" > plan.txt
+          fi
+          # Keep PR comments under the 65535 character GitHub limit.
+          head -c 60000 plan.txt > plan-truncated.txt
+          if [ "$(wc -c < plan.txt)" -gt 60000 ]; then
+            echo "" >> plan-truncated.txt
+            echo "... output truncated, see the workflow artifact for the full plan ..." >> plan-truncated.txt
+          fi
+
+      - name: Upload plan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ matrix.environment }}
+          path: |
+            infra/envs/${{ matrix.environment }}/plan.txt
+            infra/envs/${{ matrix.environment }}/${{ matrix.environment }}.tfplan
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Terraform \`${{ matrix.environment }}\`"
+            echo ""
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| init | \`${{ steps.init.outcome }}\` |"
+            echo "| validate | \`${{ steps.validate.outcome }}\` |"
+            echo "| plan | \`${{ steps.plan.outcome }}\` |"
+            echo ""
+            echo "<details><summary>Plan output</summary>"
+            echo ""
+            echo '```terraform'
+            cat plan-truncated.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment plan on the pull request
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const env = '${{ matrix.environment }}';
+            const dir = `infra/envs/${env}`;
+
+            let plan = 'No plan output was produced.';
+            try {
+              plan = fs.readFileSync(`${dir}/plan-truncated.txt`, 'utf8');
+            } catch (err) {
+              core.warning(`Could not read the plan output: ${err.message}`);
+            }
+
+            const outcomes = {
+              init: '${{ steps.init.outcome }}',
+              validate: '${{ steps.validate.outcome }}',
+              plan: '${{ steps.plan.outcome }}',
+            };
+
+            const code = (s) => '`' + s + '`';
+            const marker = '<!-- terraform-plan-' + env + ' -->';
+
+            const body = [
+              marker,
+              '### Terraform plan ' + code(env),
+              '',
+              '| Step | Result |',
+              '| --- | --- |',
+              '| init | ' + code(outcomes.init) + ' |',
+              '| validate | ' + code(outcomes.validate) + ' |',
+              '| plan | ' + code(outcomes.plan) + ' |',
+              '',
+              '<details><summary>Show plan</summary>',
+              '',
+              '```terraform',
+              plan,
+              '```',
+              '',
+              '</details>',
+              '',
+              '_Full plan is attached to the run as artifact ' +
+                code('terraform-plan-' + env) + '._',
+            ].join('\n');
+
+            // Replace the previous comment for this environment instead of
+            // appending a new one on every push.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(
+              (c) => c.user.type === 'Bot' && c.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail the job if validate did not pass
+        if: always() && steps.validate.outcome != 'success'
+        run: |
+          echo "terraform validate failed for ${{ matrix.environment }}." >&2
+          exit 1
