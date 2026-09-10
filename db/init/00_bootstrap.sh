@@ -5,6 +5,10 @@
 # here, rather than dropping them straight into /docker-entrypoint-initdb.d,
 # guarantees every migration runs before any seed file regardless of how the
 # entrypoint sorts directory entries.
+#
+# POSTGRES_USER and POSTGRES_DB are exported by the postgres entrypoint before
+# this script runs, so SC2154 is disabled for them.
+# shellcheck disable=SC2154
 set -euo pipefail
 
 SQL_DIR="${SQL_DIR:-/sql}"
