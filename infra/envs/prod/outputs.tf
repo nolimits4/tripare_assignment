@@ -32,3 +32,18 @@ output "rds_secret_arn" {
   description = "Secrets Manager ARN holding the database credentials."
   value       = module.rds.secret_arn
 }
+
+output "backup_bucket_name" {
+  description = "S3 bucket holding the scheduled pg_dump archives."
+  value       = module.backup.bucket_name
+}
+
+output "backup_schedule" {
+  description = "Cadence of the scheduled backup task."
+  value       = module.backup.schedule_expression
+}
+
+output "backup_alarm_name" {
+  description = "CloudWatch alarm that fires when a backup window passes without a successful dump."
+  value       = module.backup.alarm_name
+}
