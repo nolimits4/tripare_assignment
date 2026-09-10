@@ -50,13 +50,14 @@ case "$FORMAT" in
 esac
 
 ensure_running
+ensure_container_workdir
 
 mkdir -p "$BACKUP_DIR"
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BASENAME="${POSTGRES_DB}_${TIMESTAMP}.${EXT}"
 HOST_PATH="${BACKUP_DIR}/${BASENAME}"
-CONTAINER_PATH="${CONTAINER_BACKUP_DIR}/${BASENAME}"
+CONTAINER_PATH="${CONTAINER_WORK_DIR}/${BASENAME}"
 
 log "Database : ${POSTGRES_DB}"
 log "Format   : ${FORMAT}"
@@ -90,15 +91,22 @@ pg_exec pg_dump \
   --verbose \
   --file "$CONTAINER_PATH"
 
-[ -s "$HOST_PATH" ] || die "pg_dump produced no output at ${HOST_PATH}."
-
 # Verify the archive is readable before calling the backup good. For custom
 # format this parses the table of contents; a truncated file fails here.
 if [ "$FORMAT" = "custom" ]; then
   log "Verifying archive integrity..."
   pg_exec pg_restore --list "$CONTAINER_PATH" > /dev/null \
-    || die "The dump at ${HOST_PATH} is not a readable pg_restore archive."
+    || die "The dump is not a readable pg_restore archive."
 fi
+
+log "Copying the dump out of the container..."
+copy_from_container "$CONTAINER_PATH" "$HOST_PATH"
+
+# The container copy has served its purpose; leaving it would grow the
+# container's writable layer on every run.
+pg_exec rm -f "$CONTAINER_PATH" || warn "Could not remove the temporary dump inside the container."
+
+[ -s "$HOST_PATH" ] || die "pg_dump produced no output at ${HOST_PATH}."
 
 # Checksum, so a corrupted transfer is detectable later.
 if command -v sha256sum >/dev/null 2>&1; then
