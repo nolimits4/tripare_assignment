@@ -1,5 +1,12 @@
-name: Database
+name: Database tests
 
+# This is a test suite, not a backup job. It proves the migrations, seed data
+# and the backup/restore scripts work on a clean checkout, using a throwaway
+# database that is created and destroyed within the run.
+#
+# Real scheduled backups are infrastructure, not CI: see infra/modules/backup,
+# which runs pg_dump against RDS every four hours via EventBridge Scheduler.
+# A cron job here would only ever dump a database it had just created itself.
 on:
   pull_request:
     branches: [main]
@@ -7,9 +14,7 @@ on:
       - "db/**"
       - "scripts/**"
       - "docker-compose.yml"
-      - ".github/workflows/database.yml"
-  push:
-    branches: [main]
+      - ".github/workflows/db-tests.yml"
   workflow_dispatch:
 
 permissions:
