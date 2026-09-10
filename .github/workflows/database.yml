@@ -27,10 +27,23 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck scripts/*.sh scripts/lib/*.sh db/init/*.sh
+          # -x follows the `. lib/common.sh` sourcing so the library's
+          # definitions are in scope. --severity=warning ignores style and
+          # info notes, which would otherwise fail the run on cosmetics.
+          shellcheck -x --severity=warning \
+            scripts/*.sh scripts/lib/*.sh db/init/*.sh
+
+      - name: Ensure the scripts are executable
+        # Guards against the executable bit being lost when the repository is
+        # committed from Windows.
+        run: chmod +x scripts/*.sh scripts/lib/*.sh db/init/*.sh
 
       - name: Start PostgreSQL
         run: docker compose up -d --wait
+
+      - name: Show the bootstrap log
+        if: always()
+        run: docker compose logs postgres
 
       - name: Show the seeded dataset
         run: |
