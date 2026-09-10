@@ -1,0 +1,39 @@
+# --- Terraform ---------------------------------------------------------------
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.txt
+crash.log
+crash.*.log
+.terraform.lock.hcl
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Real backend configuration is environment specific; only the example is
+# tracked.
+backend.hcl
+
+# Never commit variable files that may carry secrets. The dev/prod tfvars in
+# this repo are deliberate examples and are force-added.
+*.auto.tfvars
+secrets.tfvars
+
+# --- Local environment --------------------------------------------------------
+.env
+.env.local
+
+# --- Database artefacts -------------------------------------------------------
+backups/*
+!backups/.gitkeep
+
+# --- Editors and OS -----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
