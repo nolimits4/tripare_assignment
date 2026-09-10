@@ -35,3 +35,14 @@ db_skip_final_snapshot          = true
 db_performance_insights_enabled = false
 db_monitoring_interval          = 0
 db_apply_immediately            = true
+
+# Scheduled logical backups: the schedule is defined but left disabled in dev.
+# RDS automated backups already cover recovery here, and a Fargate task every
+# four hours is pure cost for an environment nobody would restore from.
+backup_schedule_expression        = "rate(4 hours)"
+backup_schedule_enabled           = false
+backup_retention_days             = 7
+backup_transition_to_ia_days      = 0
+backup_transition_to_glacier_days = 0
+backup_alarm_on_failure           = false
+backup_force_destroy_bucket       = true

@@ -3,6 +3,11 @@ output "cluster_name" {
   value       = aws_ecs_cluster.this.name
 }
 
+output "cluster_arn" {
+  description = "ARN of the ECS cluster. The scheduled backup task reuses it."
+  value       = aws_ecs_cluster.this.arn
+}
+
 output "service_name" {
   description = "Name of the ECS service."
   value       = aws_ecs_service.this.name

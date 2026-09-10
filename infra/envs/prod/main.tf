@@ -73,8 +73,12 @@ module "rds" {
   vpc_id             = module.network.vpc_id
   private_subnet_ids = module.network.private_subnet_ids
 
-  # The single entry here is what keeps the database private to Fargate.
-  allowed_security_group_ids = [module.ecs.task_security_group_id]
+  # These two entries are the only routes into the database: the application
+  # tasks, and the scheduled backup task.
+  allowed_security_group_ids = [
+    module.ecs.task_security_group_id,
+    aws_security_group.backup_task.id,
+  ]
 
   engine_version        = var.db_engine_version
   instance_class        = var.db_instance_class

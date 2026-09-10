@@ -38,3 +38,14 @@ db_skip_final_snapshot          = false
 db_performance_insights_enabled = true
 db_monitoring_interval          = 60
 db_apply_immediately            = false
+
+# Scheduled logical backups every four hours, kept for a year, tiered down to
+# cheaper storage classes as they age. The bucket cannot be force-destroyed and
+# an alarm fires if a backup window passes without a successful dump.
+backup_schedule_expression        = "rate(4 hours)"
+backup_schedule_enabled           = true
+backup_retention_days             = 365
+backup_transition_to_ia_days      = 30
+backup_transition_to_glacier_days = 90
+backup_alarm_on_failure           = true
+backup_force_destroy_bucket       = false

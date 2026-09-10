@@ -1,0 +1,89 @@
+name: Restore drill
+
+# On-demand disaster recovery drill.
+#
+# Restoring is never automatic: it is destructive, and the operator has to
+# choose which dump to trust. This workflow is manual only, takes the dump as
+# an input, and proves that a given archive actually restores into a working
+# database with its indexes and referential integrity intact.
+#
+# Run it after a schema change, before a risky migration, or on a regular
+# cadence as a recovery rehearsal. An untested backup is not a backup.
+on:
+  workflow_dispatch:
+    inputs:
+      dump_artifact:
+        description: "Name of a workflow artifact containing the dump. Leave blank to generate a fresh backup and restore that instead."
+        required: false
+        type: string
+      dump_run_id:
+        description: "Run ID the artifact belongs to. Required if dump_artifact is set."
+        required: false
+        type: string
+      target_database:
+        description: "Database name to restore into."
+        required: false
+        default: "hotelapp_restored"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  restore-drill:
+    name: Restore and verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make the scripts executable
+        run: chmod +x scripts/*.sh scripts/lib/*.sh db/init/*.sh
+
+      - name: Start PostgreSQL
+        run: docker compose up -d --wait
+
+      - name: Download the dump under test
+        if: inputs.dump_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.dump_artifact }}
+          path: backups/
+          run-id: ${{ inputs.dump_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate a fresh backup to restore
+        if: inputs.dump_artifact == ''
+        run: ./scripts/backup.sh
+
+      - name: Record the source fingerprint
+        run: |
+          docker compose exec -T postgres \
+            psql -U hotelapp -d hotelapp -f /sql/queries/verify_data.sql \
+            | tee source-fingerprint.txt
+
+      - name: Restore and verify
+        run: ./scripts/restore.sh --target "${{ inputs.target_database }}"
+
+      - name: Confirm the restored database answers the reporting query
+        run: |
+          docker compose exec -T postgres \
+            psql -U hotelapp -d "${{ inputs.target_database }}" \
+            -f /sql/queries/report_query.sql
+
+      - name: Upload the drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: restore-drill-evidence
+          path: |
+            source-fingerprint.txt
+            backups/*.manifest.txt
+            backups/restore_*.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

@@ -51,6 +51,7 @@ if [ "$IN_PLACE" -eq 1 ]; then
 fi
 
 ensure_running
+ensure_container_workdir
 
 # --- Locate the dump ---------------------------------------------------------
 
@@ -59,25 +60,30 @@ if [ -n "$DUMP_ARG" ]; then
   DUMP_PATH="$(cd "$(dirname "$DUMP_ARG")" && pwd)/$(basename "$DUMP_ARG")"
 else
   log "No dump given, selecting the most recent one in ${BACKUP_DIR}..."
-  # shellcheck disable=SC2012
-  DUMP_PATH="$(ls -1t "${BACKUP_DIR}"/*.dump "${BACKUP_DIR}"/*.sql 2>/dev/null \
-    | grep -v '/latest\.' \
-    | head -n 1 || true)"
+  # Sort by mtime, newest first. GNU find's -printf gives "<epoch>\t<path>",
+  # which sorts numerically and cuts cleanly even if a path contains spaces.
+  # BSD find (macOS) has no -printf, so fall back to ls there.
+  DUMP_PATH="$(
+    find "$BACKUP_DIR" -maxdepth 1 -type f \( -name '*.dump' -o -name '*.sql' \) \
+      -not -name 'latest.*' -printf '%T@\t%p\n' 2>/dev/null \
+      | sort -rn \
+      | head -n 1 \
+      | cut -f2-
+  )"
+
+  if [ -z "$DUMP_PATH" ]; then
+    # shellcheck disable=SC2012  # -printf is unavailable; ls -t is the portable option
+    DUMP_PATH="$(
+      ls -1t "${BACKUP_DIR}"/*.dump "${BACKUP_DIR}"/*.sql 2>/dev/null \
+        | grep -v '/latest\.' \
+        | head -n 1 || true
+    )"
+  fi
   [ -n "$DUMP_PATH" ] || die "No backups found in ${BACKUP_DIR}. Run ./scripts/backup.sh first."
 fi
 
 DUMP_NAME="$(basename "$DUMP_PATH")"
-
-case "$DUMP_PATH" in
-  "${BACKUP_DIR}"/*) CONTAINER_PATH="${CONTAINER_BACKUP_DIR}/${DUMP_NAME}" ;;
-  *)
-    # The container can only see BACKUP_DIR, so stage anything outside it.
-    log "Dump lives outside ${BACKUP_DIR}; staging a copy so the container can read it."
-    mkdir -p "$BACKUP_DIR"
-    cp "$DUMP_PATH" "${BACKUP_DIR}/${DUMP_NAME}"
-    CONTAINER_PATH="${CONTAINER_BACKUP_DIR}/${DUMP_NAME}"
-    ;;
-esac
+CONTAINER_PATH="${CONTAINER_WORK_DIR}/${DUMP_NAME}"
 
 # --- Verify the checksum if one was recorded ---------------------------------
 
@@ -94,6 +100,11 @@ if [ -f "$CHECKSUM_FILE" ]; then
 else
   warn "No checksum file alongside ${DUMP_NAME}; skipping verification."
 fi
+
+# --- Make the dump visible to the container ----------------------------------
+
+log "Copying the dump into the container..."
+copy_to_container "$DUMP_PATH" "$CONTAINER_PATH"
 
 # --- Detect the format -------------------------------------------------------
 
@@ -160,6 +171,8 @@ if [ "$RESTORE_RC" -ne 0 ]; then
   warn "does not have yet. The verification below is what decides the outcome."
   echo "  log: ${RESTORE_LOG}"
 fi
+
+pg_exec rm -f "$CONTAINER_PATH" || warn "Could not remove the staged dump inside the container."
 
 # --- Verify ------------------------------------------------------------------
 

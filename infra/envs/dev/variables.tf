@@ -165,3 +165,47 @@ variable "db_apply_immediately" {
   type        = bool
   default     = true
 }
+
+# --- Scheduled backups -------------------------------------------------------
+
+variable "backup_schedule_expression" {
+  description = "How often the pg_dump task runs."
+  type        = string
+  default     = "rate(4 hours)"
+}
+
+variable "backup_schedule_enabled" {
+  description = "Whether the schedule is active. Off in dev by default, since RDS automated backups already cover it and Fargate runs cost money."
+  type        = bool
+  default     = false
+}
+
+variable "backup_retention_days" {
+  description = "Days before a dump is deleted from S3."
+  type        = number
+  default     = 7
+}
+
+variable "backup_transition_to_ia_days" {
+  description = "Days before a dump moves to Standard-IA. 0 disables the transition."
+  type        = number
+  default     = 0
+}
+
+variable "backup_transition_to_glacier_days" {
+  description = "Days before a dump moves to Glacier Instant Retrieval. 0 disables the transition."
+  type        = number
+  default     = 0
+}
+
+variable "backup_alarm_on_failure" {
+  description = "Alarm when no successful backup completes in the expected window."
+  type        = bool
+  default     = false
+}
+
+variable "backup_force_destroy_bucket" {
+  description = "Let Terraform delete a non-empty backup bucket. Acceptable in dev only."
+  type        = bool
+  default     = true
+}
