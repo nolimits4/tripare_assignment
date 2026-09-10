@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Shared configuration and helpers for the database scripts.
 # Sourced, not executed.
+#
+# SC2034 is disabled file-wide: this is a library, so most of what it defines
+# is consumed by the scripts that source it rather than used here.
+# shellcheck shell=bash disable=SC2034
 
 set -euo pipefail
 
@@ -22,8 +26,17 @@ POSTGRES_USER="${POSTGRES_USER:-hotelapp}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-hotelapp_local_pw}"
 
 BACKUP_DIR="${BACKUP_DIR:-${REPO_ROOT}/backups}"
-# Path the same directory is mounted at inside the container.
-CONTAINER_BACKUP_DIR="/backups"
+
+# Dumps are written to a container-local directory and then copied out with
+# `docker cp`, rather than written straight into a bind-mounted host directory.
+#
+# A bind mount would be simpler, but pg_dump runs as the postgres user (uid 999)
+# inside the container while the host directory is owned by whoever cloned the
+# repository. On Linux and on CI runners that mismatch makes the directory
+# unwritable and the dump fails with a permission error. Docker Desktop masks
+# the problem on macOS and Windows, so it only shows up in CI. Copying sidesteps
+# uid mapping entirely and behaves identically on every platform.
+CONTAINER_WORK_DIR="/tmp/hotelapp-backups"
 
 # --- Output ------------------------------------------------------------------
 
@@ -98,6 +111,36 @@ wait_for_postgres() {
   done
 
   die "PostgreSQL was not ready after $((attempts * 2))s. Check: docker compose logs ${PG_SERVICE}"
+}
+
+# --- Copying files in and out of the container -------------------------------
+
+# `docker compose cp` only exists in Compose v2, so the container ID is
+# resolved and plain `docker cp` is used instead. That works with both.
+container_id() {
+  local id
+  id="$(compose ps -q "$PG_SERVICE" 2>/dev/null | head -n 1)"
+  [ -n "$id" ] || die "Could not resolve the container ID for service '${PG_SERVICE}'."
+  printf '%s' "$id"
+}
+
+ensure_container_workdir() {
+  # The postgres user owns it, so pg_dump can write there.
+  pg_exec mkdir -p "$CONTAINER_WORK_DIR"
+}
+
+copy_from_container() {
+  local container_path="$1"
+  local host_path="$2"
+  docker cp "$(container_id):${container_path}" "$host_path" \
+    || die "Failed to copy ${container_path} out of the container."
+}
+
+copy_to_container() {
+  local host_path="$1"
+  local container_path="$2"
+  docker cp "$host_path" "$(container_id):${container_path}" \
+    || die "Failed to copy ${host_path} into the container."
 }
 
 ensure_running() {
